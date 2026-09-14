@@ -1517,46 +1517,67 @@ async function kAsk(){
 }
 
 /* ---- curation ---- */
-function kOpenQueue(){
-  var b=document.getElementById('queueBody');
+var QDAY=null;
+function kQueueDays(){
+  var by={};
+  PENDING.forEach(function(p){ (by[p.date]=by[p.date]||[]).push(p); });
+  return by;
+}
+function kOpenQueue(){ QDAY=null; kRenderQueue(); kOpen('queuePanel'); }
+function kRenderQueue(){
+  var b=document.getElementById('queueBody'), by=kQueueDays(), days=Object.keys(by).sort();
   if(!PENDING.length){
     b.innerHTML='<p class="knote">Nothing waiting. Every plate has a place.</p>';
-  } else {
-    var opts=entries.map(function(e){
-      return '<option value="'+e.id+'">'+e.date+' — '+esc(e.title)+'</option>';
-    }).join('');
-    b.innerHTML='<p class="knote">'+PENDING.length+' frames were brought in from the camera roll '+
-      'but have not been set down in the register. File the ones worth keeping.</p>'+
-      PENDING.map(function(p){
-        return '<div class="qitem" id="q_'+p.id+'">'+
-          '<img src="'+p.thumb+'" loading="lazy" alt="">'+
-          '<div class="meta"><b>'+p.date+(p.kind==='video'?' · clip':'')+'</b>'+
-          '<select id="sel_'+p.id+'">'+opts+'</select></div>'+
-          '<button class="btn" onclick="kFile(\''+p.id+'\')">File</button>'+
-          '<button class="btn ghost" onclick="kReject(\''+p.id+'\')">Strike</button>'+
-        '</div>';
-      }).join('');
-    PENDING.forEach(function(p){
-      var s=document.getElementById('sel_'+p.id); if(s&&p.entry_id) s.value=p.entry_id;
-    });
+    return;
   }
-  kOpen('queuePanel');
+  if(!QDAY){
+    // One day at a time: 300 thumbnails at once exhausts the browser's
+    // connections and burns egress for frames you will not look at.
+    b.innerHTML='<p class="knote">'+PENDING.length+' frames came in from the camera roll '+
+      'but have not been set down in the register. Take one day at a time.</p>'+
+      days.map(function(d){
+        var n=by[d].length, v=by[d].filter(function(x){return x.kind==='video'}).length;
+        return '<div class="qitem"><div class="meta"><b>'+d+'</b>'+n+' frame'+(n===1?'':'s')+
+          (v?' · '+v+' clip'+(v===1?'':'s'):'')+'</div>'+
+          '<button class="btn" onclick="QDAY=\''+d+'\';kRenderQueue()">Open</button></div>';
+      }).join('');
+    return;
+  }
+  var list=by[QDAY]||[];
+  var opts=entries.map(function(e){
+    return '<option value="'+e.id+'">'+e.date+' — '+esc(e.title)+'</option>';
+  }).join('');
+  b.innerHTML='<p class="knote"><a href="#" onclick="QDAY=null;kRenderQueue();return false">&larr; all days</a>'+
+    ' &nbsp;·&nbsp; '+QDAY+' — '+list.length+' frames</p>'+
+    list.map(function(p){
+      return '<div class="qitem" id="q_'+p.id+'">'+
+        '<img src="'+p.thumb+'" loading="lazy" alt="">'+
+        '<div class="meta"><b>'+p.date+(p.kind==='video'?' · clip':'')+'</b>'+
+        '<select id="sel_'+p.id+'">'+opts+'</select></div>'+
+        '<button class="btn" onclick="kFile(\''+p.id+'\')">File</button>'+
+        '<button class="btn ghost" onclick="kReject(\''+p.id+'\')">Strike</button>'+
+      '</div>';
+    }).join('');
+  list.forEach(function(p){
+    var s=document.getElementById('sel_'+p.id);
+    if(s && p.entry_id) s.value=p.entry_id;
+  });
 }
 async function kFile(id){
   var sel=document.getElementById('sel_'+id);
   try{
     await sbFileMedia(id, sel?sel.value:null);
-    var el=document.getElementById('q_'+id); if(el) el.remove();
     PENDING=PENDING.filter(function(p){return p.id!==id});
     document.getElementById('ktally').textContent=PENDING.length;
+    kRenderQueue();
   }catch(e){ alert(e.message||'could not file that plate'); }
 }
 async function kReject(id){
   try{
     await sbRejectMedia(id);
-    var el=document.getElementById('q_'+id); if(el) el.remove();
     PENDING=PENDING.filter(function(p){return p.id!==id});
     document.getElementById('ktally').textContent=PENDING.length;
+    kRenderQueue();
   }catch(e){ alert(e.message||'could not strike that plate'); }
 }
 </script>
