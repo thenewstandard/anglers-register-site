@@ -617,6 +617,7 @@ var sb = window.supabase.createClient(SB_URL, SB_ANON, {
 
 var ME = null;            // profile row when signed in, else null
 var PENDING = [];         // media awaiting curation (family only)
+var MEDIA_BY_URL = {};    // public URL -> media id, so the lightbox can identify a fish
 
 function pub(p) { return p ? SB_URL + '/storage/v1/object/public/' + p : null; }
 
@@ -639,19 +640,25 @@ async function sbLoadAll() {
   var sites      = q[2].data || [];
 
   PENDING = [];
+  MEDIA_BY_URL = {};
   var entries = rawEntries.map(function (e) {
     var filed = (e.media || []).filter(function (m) { return m.review_state === 'filed'; });
     filed.sort(function (a, b) {
       return (b.is_hero ? 1 : 0) - (a.is_hero ? 1 : 0) || (a.sort_order - b.sort_order);
     });
     (e.media || []).forEach(function (m) {
+      MEDIA_BY_URL[pub(m.storage_path)] = { id: m.id, kind: m.kind, entry_id: e.id, date: e.date };
       if (m.review_state === 'pending') {
         PENDING.push({ id: m.id, entry_id: e.id, date: e.date, kind: m.kind,
                        thumb: pub(m.thumb_path || m.poster_path || m.storage_path),
                        src: pub(m.storage_path) });
       }
     });
-    var urls = filed.map(function (m) { return pub(m.storage_path); });
+    var urls = filed.map(function (m) {
+      var u = pub(m.storage_path);
+      MEDIA_BY_URL[u] = { id: m.id, kind: m.kind, entry_id: e.id, date: e.date };
+      return u;
+    });
     return {
       id: e.id, date: e.date, title: e.title,
       location: e.location, anglers: e.anglers, notes: e.notes,
@@ -819,6 +826,12 @@ async function sbFileMedia(id, entryId) {
 }
 async function sbRejectMedia(id) {
   var r = await sb.from('media').update({ review_state: 'rejected' }).eq('id', id);
+  if (r.error) throw r.error;
+}
+
+async function sbSetNotes(entryId, notes) {
+  if (!ME) throw new Error('sign in to write to the register');
+  var r = await sb.from('entries').update({ notes: notes }).eq('id', entryId);
   if (r.error) throw r.error;
 }
 
@@ -1321,7 +1334,19 @@ function saveEntryForm(){
   function commit(){
     if(!existing){ entries.unshift(en); }
     entries.sort(function(a,b){ return (b.date||'').localeCompare(a.date||'') || ((b.id>a.id)?1:-1); });
-    saveEntry(en); editingId=null; closeModal(); renderJournal(); renderGallery();
+    en._newMedia = window.__pendingMedia || [];
+    window.__pendingMedia = [];
+    if(en._newMedia.length && !(en._media && en._media.length)) en._newMedia[0].is_hero = true;
+    Promise.resolve(saveEntry(en)).then(function(){
+      editingId=null; closeModal();
+      return load();
+    }).then(function(){
+      renderLog(); renderJournal(); renderGallery();
+      try{ kPaintBar(); }catch(e){}
+    }).catch(function(err){
+      alert((err && err.message) || 'the entry could not be saved');
+      if(save){ save.textContent='Save'; save.disabled=false; }
+    });
   }
   if(file){ readPhoto(file,function(data){ if(data) en.photo=data; commit(); }); }
   else { if(removePhotoFlag) en.photo=null; commit(); }
@@ -1331,7 +1356,7 @@ function removeEntry(id){
   delEntryStore(id); renderJournal(); renderGallery();
 }
 function readPhoto(file, cb){
-  var day = (document.getElementById('efDate')||{}).value || null;
+  var day = (document.getElementById('enDate')||{}).value || null;
   sbUploadMedia(file, day).then(function(m){
     if(!window.__pendingMedia) window.__pendingMedia = [];
     window.__pendingMedia.push(m);
@@ -1399,6 +1424,7 @@ document.addEventListener('keydown',function(e){
   padding:7px 13px;border-radius:3px;border:1px solid #3a3226;background:#3a3226;
   color:#f2ecdc;cursor:pointer}
 .kpanel .btn.ghost{background:transparent;color:#3a3226}
+.mmode.on{background:#3a3226;color:#f2ecdc}
 .msg{margin:0 0 13px;padding:10px 12px;border-radius:4px;font-size:13.5px;line-height:1.62}
 .msg.user{background:#e8e0cb;border:1px solid #d2c7ab}
 .msg.bot{background:#fbf8ef;border:1px solid #ddd3ba;white-space:pre-wrap}
@@ -1410,6 +1436,13 @@ document.addEventListener('keydown',function(e){
 .qitem .meta b{display:block;color:#332d22;font-size:12.5px}
 .knote{font-size:12px;color:#6b6150;font-style:italic;margin:0 0 12px}
 </style>
+
+<button id="lbIdent" onclick="kIdentify()"
+  style="display:none;position:fixed;left:50%;transform:translateX(-50%);bottom:76px;z-index:1000;
+         font:inherit;font-size:11px;letter-spacing:.09em;text-transform:uppercase;cursor:pointer;
+         background:#f4f0e4;border:1px solid #b8ac90;color:#3a3226;padding:7px 14px;border-radius:3px">
+  What fish is this?
+</button>
 
 <div id="kbar">
   <span class="who" id="kwho">not signed in</span>
@@ -1439,11 +1472,20 @@ document.addEventListener('keydown',function(e){
 <div class="kpanel" id="mentorPanel" onclick="if(event.target===this)kClose('mentorPanel')">
   <div class="sheet">
     <h3>The mentor</h3>
+    <div style="padding:9px 18px 0;display:flex;gap:6px">
+      <button class="btn ghost mmode on" id="mm_ask"   onclick="kMode('ask')">Ask</button>
+      <button class="btn ghost mmode"    id="mm_draft" onclick="kMode('draft')">Draft a day</button>
+      <span style="flex:1"></span>
+      <button class="btn ghost" onclick="kHistory()">Past threads</button>
+    </div>
     <div class="body" id="mentorLog">
       <p class="knote">Ask anything about the fishing. Every question and answer is kept,
         so the three of you build one record of what you have learned.</p>
     </div>
     <div class="foot" style="flex-direction:column;align-items:stretch;gap:7px">
+      <div id="draftPick" style="display:none">
+        <select id="draftEntry"></select>
+      </div>
       <textarea id="mentorInput" placeholder="Ask the mentor&hellip;"></textarea>
       <div style="display:flex;gap:7px">
         <button class="btn" id="mentorSend" onclick="kAsk()">Ask</button>
@@ -1466,6 +1508,14 @@ document.addEventListener('keydown',function(e){
 
 <script>
 function kOpen(id){ document.getElementById(id).classList.add('open'); }
+// The lightbox is the journal's own; watch it rather than patching its code.
+document.addEventListener('DOMContentLoaded', function(){
+  var lb=document.getElementById('lb');
+  if(!lb) return;
+  new MutationObserver(kLbSync).observe(lb, {attributes:true, attributeFilter:['class']});
+  new MutationObserver(kLbSync).observe(document.getElementById('lbImg'),
+    {attributes:true, attributeFilter:['src','style']});
+});
 function kClose(id){ document.getElementById(id).classList.remove('open'); }
 function kToggleAuth(){
   if(ME){ sbSignOut().then(function(){ location.reload(); }); }
@@ -1494,26 +1544,121 @@ function kPaintBar(){
 }
 
 /* ---- mentor ---- */
-var MENTOR_THREAD=null;
-function kMsg(role,text){
+var MENTOR_THREAD=null, MMODE='ask';
+function kMode(m){
+  MMODE=m;
+  ['ask','draft'].forEach(function(x){
+    document.getElementById('mm_'+x).classList.toggle('on', x===m);
+  });
+  var pick=document.getElementById('draftPick'), ta=document.getElementById('mentorInput');
+  var send=document.getElementById('mentorSend');
+  if(m==='draft'){
+    pick.style.display='';
+    var sel=document.getElementById('draftEntry');
+    sel.innerHTML=entries.map(function(e){
+      var mark = e.notes ? '' : ' — not yet written up';
+      return '<option value="'+e.id+'">'+e.date+' · '+esc(e.title)+mark+'</option>';
+    }).join('');
+    ta.placeholder='Anything to add? Weather, who came, what happened. Optional.';
+    send.textContent='Draft it';
+  } else {
+    pick.style.display='none';
+    ta.placeholder='Ask the mentor\u2026';
+    send.textContent='Ask';
+  }
+}
+function kMsg(role,text,entryId){
   var d=document.createElement('div');
   d.className='msg '+(role==='user'?'user':'bot');
   d.innerHTML='<span class="lbl">'+(role==='user'?(ME?ME.display_name:'you'):'the mentor')+'</span>';
   d.appendChild(document.createTextNode(text));
+  if(role==='bot' && entryId){
+    var b=document.createElement('button');
+    b.className='btn'; b.style.marginTop='9px'; b.textContent='Use this as the entry';
+    b.onclick=function(){ kUseDraft(entryId, text, b); };
+    d.appendChild(document.createElement('br')); d.appendChild(b);
+  }
   document.getElementById('mentorLog').appendChild(d);
   d.scrollIntoView({block:'end'});
 }
+async function kUseDraft(entryId, text, btn){
+  btn.disabled=true; btn.textContent='Saving\u2026';
+  try{
+    await sbSetNotes(entryId, text);
+    await load(); renderLog(); renderJournal(); buildLB();
+    btn.textContent='Written into the register';
+  }catch(e){ btn.disabled=false; btn.textContent='Use this as the entry'; alert(e.message||'could not save'); }
+}
 async function kAsk(){
   var ta=document.getElementById('mentorInput'), q=ta.value.trim();
-  if(!q) return;
   var btn=document.getElementById('mentorSend');
-  ta.value=''; kMsg('user',q); btn.disabled=true; btn.textContent='Thinking';
+  var entryId = MMODE==='draft' ? (document.getElementById('draftEntry')||{}).value : null;
+  if(MMODE==='ask' && !q) return;
+  var label = MMODE==='draft'
+    ? ('Draft the entry for ' + (entryId||'') + (q ? ' — ' + q : ''))
+    : q;
+  ta.value=''; kMsg('user',label);
+  btn.disabled=true; btn.textContent='Thinking';
   try{
-    var r=await sbMentor('ask',{message:q,thread_id:MENTOR_THREAD});
-    MENTOR_THREAD=r.thread_id; kMsg('bot',r.answer);
+    var payload = MMODE==='draft'
+      ? {message:q, entry_id:entryId, thread_id:MENTOR_THREAD}
+      : {message:q, thread_id:MENTOR_THREAD};
+    var r=await sbMentor(MMODE,payload);
+    MENTOR_THREAD=r.thread_id;
+    kMsg('bot', r.answer, MMODE==='draft' ? entryId : null);
     document.getElementById('mentorLeft').textContent=r.calls_remaining+' left today';
   }catch(ex){ kMsg('bot','— '+(ex.message||'the mentor could not answer')); }
-  btn.disabled=false; btn.textContent='Ask';
+  btn.disabled=false; kMode(MMODE);
+}
+async function kHistory(){
+  var log=document.getElementById('mentorLog');
+  log.innerHTML='<p class="knote">Reading the log\u2026</p>';
+  var th=await sbMentorThreads();
+  if(!th.length){ log.innerHTML='<p class="knote">Nothing asked yet.</p>'; return; }
+  log.innerHTML='<p class="knote">'+th.length+' thread'+(th.length===1?'':'s')+
+    ' kept. Newest first.</p>';
+  th.forEach(function(t){
+    var msgs=(t.mentor_messages||[]).sort(function(a,b){
+      return (a.created_at||'').localeCompare(b.created_at||''); });
+    var h=document.createElement('div');
+    h.className='msg bot'; h.style.background='#efe8d6';
+    h.innerHTML='<span class="lbl">'+(t.created_at||'').slice(0,10)+'</span>';
+    h.appendChild(document.createTextNode(t.title||'Untitled'));
+    h.style.cursor='pointer';
+    h.onclick=function(){
+      MENTOR_THREAD=t.id;
+      log.innerHTML='';
+      msgs.forEach(function(m){ kMsg(m.role==='user'?'user':'bot', m.content); });
+    };
+    log.appendChild(h);
+  });
+}
+
+/* ---- identify, from the lightbox ---- */
+function kLbSync(){
+  var btn=document.getElementById('lbIdent');
+  var lb=document.getElementById('lb');
+  var img=document.getElementById('lbImg');
+  var on = ME && lb.classList.contains('on') && img.style.display!=='none' && img.getAttribute('src');
+  btn.style.display = on ? '' : 'none';
+  btn.textContent = 'What fish is this?';
+  btn.disabled=false;
+}
+async function kIdentify(){
+  var img=document.getElementById('lbImg');
+  var rec = MEDIA_BY_URL[img.getAttribute('src')];
+  var btn=document.getElementById('lbIdent');
+  if(!rec){ alert('That plate is not in the register yet.'); return; }
+  btn.disabled=true; btn.textContent='Looking\u2026';
+  try{
+    var r=await sbMentor('identify',{media_id:rec.id, thread_id:null});
+    MENTOR_THREAD=r.thread_id;
+    document.getElementById('mentorLog').innerHTML='';
+    kMsg('user','What fish is this? ('+(rec.date||'')+')');
+    kMsg('bot',r.answer);
+    closeLb(); kMode('ask'); kOpen('mentorPanel');
+  }catch(e){ alert(e.message||'the mentor could not look at that one'); }
+  btn.disabled=false; btn.textContent='What fish is this?';
 }
 
 /* ---- curation ---- */
